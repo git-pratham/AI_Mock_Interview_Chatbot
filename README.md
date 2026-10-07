@@ -44,6 +44,7 @@ PrepWise is a Next.js 15 application that delivers AI-assisted mock interviews, 
 	 ```
 2. **Configure environment variables**
 	 - Create an `.env.local` file and add the required Firebase, Vapi, and AI keys.
+	 - Interview sessions automatically record microphone audio in the browser and trigger a download when the interview ends. Microphone access is required; recordings are not uploaded by this feature.
 3. **Run in development**
 	 ```bash
 	 npm run dev

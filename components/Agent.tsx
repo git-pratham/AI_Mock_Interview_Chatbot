@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 import { cn } from "@/lib/utils";
@@ -34,6 +34,14 @@ const Agent = ({
   const [messages, setMessages] = useState<SavedMessage[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [lastMessage, setLastMessage] = useState<string>("");
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingComplete, setRecordingComplete] = useState(true);
+  const [recordingError, setRecordingError] = useState("");
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  const [recordingFileName, setRecordingFileName] = useState("interview-recording.webm");
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     const onCallStart = () => {
@@ -105,17 +113,130 @@ const Agent = ({
       }
     };
 
-    if (callStatus === CallStatus.FINISHED) {
+    if (callStatus === CallStatus.FINISHED && recordingComplete) {
       if (type === "generate") {
         router.push("/dashboard");
       } else {
         handleGenerateFeedback(messages);
       }
     }
-  }, [messages, callStatus, feedbackId, interviewId, router, type, userId]);
+  }, [messages, callStatus, feedbackId, interviewId, recordingComplete, router, type, userId]);
 
-   const handleCall = async () => {
+  useEffect(() => {
+    if (callStatus !== CallStatus.FINISHED) return;
+
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+      return;
+    }
+
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingStreamRef.current = null;
+    setRecordingComplete(true);
+  }, [callStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      if (recordingUrl) URL.revokeObjectURL(recordingUrl);
+    };
+  }, [recordingUrl]);
+
+  const startRecording = async () => {
+    if (!navigator.mediaDevices?.getUserMedia || !("MediaRecorder" in window)) {
+      throw new Error("Automatic recording is not supported by this browser.");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordingStreamRef.current = stream;
+    recordingChunksRef.current = [];
+
+    const supportedMimeType = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+    ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+    const recorder = supportedMimeType
+      ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+      : new MediaRecorder(stream);
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) recordingChunksRef.current.push(event.data);
+    };
+
+    recorder.onstop = () => {
+      const recordingBlob = new Blob(recordingChunksRef.current, {
+        type: recorder.mimeType || "audio/webm",
+      });
+      recordingChunksRef.current = [];
+      mediaRecorderRef.current = null;
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+      setIsRecording(false);
+
+      if (recordingBlob.size === 0) {
+        setRecordingError("The interview recording is empty and could not be downloaded.");
+        setRecordingComplete(true);
+        return;
+      }
+
+      const nextUrl = URL.createObjectURL(recordingBlob);
+      const fileName = recorder.mimeType.includes("mp4")
+        ? "interview-recording.mp4"
+        : "interview-recording.webm";
+      setRecordingUrl((previousUrl) => {
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        return nextUrl;
+      });
+      setRecordingFileName(fileName);
+
+      const downloadLink = document.createElement("a");
+      downloadLink.href = nextUrl;
+      downloadLink.download = fileName;
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      downloadLink.remove();
+      setRecordingComplete(true);
+    };
+
+    recorder.onerror = () => {
+      setRecordingError("The interview recording failed and could not be downloaded.");
+      setIsRecording(false);
+      setRecordingComplete(true);
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+    };
+
+    recorder.start(250);
+    mediaRecorderRef.current = recorder;
+    setRecordingError("");
+    setRecordingComplete(false);
+    setIsRecording(true);
+  };
+
+  const handleCall = async () => {
     setCallStatus(CallStatus.CONNECTING);
+    setRecordingError("");
+    setRecordingComplete(true);
+    setRecordingUrl((previousUrl) => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      return null;
+    });
+
+    if (type === "interview") {
+      try {
+        await startRecording();
+      } catch (error) {
+        console.error("Could not start interview recording:", error);
+        setRecordingError(
+          error instanceof Error ? error.message : "Could not start interview recording."
+        );
+      }
+    }
 
     if (type === "generate") {
       await vapi.start(
@@ -168,6 +289,31 @@ const Agent = ({
           </div>
           <h3>AI Interviewer</h3>
         </div>
+
+        {type === "interview" && callStatus === CallStatus.INACTIVE && (
+          <p className="w-full text-center text-sm text-white/80">
+            Recording starts automatically and downloads when the interview ends. Microphone access is required.
+          </p>
+        )}
+
+        {(isRecording || recordingError) && (
+          <div className="w-full text-center text-sm">
+            {isRecording && <p className="text-emerald-300">Recording interview audio.</p>}
+            {recordingError && <p role="alert" className="text-red-300">{recordingError}</p>}
+          </div>
+        )}
+
+        {recordingUrl && (
+          <div className="w-full flex justify-center">
+            <a
+              href={recordingUrl}
+              download={recordingFileName}
+              className="rounded-lg border border-emerald-400/50 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200 hover:bg-emerald-500/20"
+            >
+              Download interview recording
+            </a>
+          </div>
+        )}
 
         {/* User Profile Card */}
         <div className="card-border">
